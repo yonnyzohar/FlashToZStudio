@@ -1,6 +1,6 @@
 # swfExporter_mac
 
-Exports a compiled `.swf` file into a scene hierarchy, animations, and images consumable by the `zImporter_PIXI` runtime and the `graphicsIDE` editor.
+Exports a compiled `.swf` file into a scene hierarchy, animations, and images consumable by the `zImporter_PIXI` runtime and the `zStudio` editor.
 
 ## Output
 
