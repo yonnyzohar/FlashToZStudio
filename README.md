@@ -32,12 +32,20 @@ A copy of `placements.json` is also written directly to `<outputFolder>/` for co
 | `-outputFolder:<path>` | No | Output directory. Defaults to the SWF's own directory. |
 | `-useTextureAtlas` | No | Pack all images into a single texture atlas instead of individual PNGs |
 
-### Example
+### Example (macOS)
 
 ```bash
 ./swfExporter_mac.app/Contents/MacOS/FlashToOutput \
   -swf:/Users/me/myProject/animation.swf \
   -outputFolder:/Users/me/myProject/exported
+```
+
+### Example (Windows)
+
+```bat
+swfExporter_win.exe ^
+  -swf:C:\Users\me\myProject\animation.swf ^
+  -outputFolder:C:\Users\me\myProject\exported
 ```
 
 Output will be written to:
