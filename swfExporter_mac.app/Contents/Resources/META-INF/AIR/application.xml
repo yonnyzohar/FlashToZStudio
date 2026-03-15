@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<application xmlns="http://ns.adobe.com/air/application/51.1">
+    <id>FlashToOutput</id>
+    <versionNumber>1.0.0</versionNumber>
+    <filename>FlashToOutput</filename>
+    <name>FlashToOutput</name>
+    <initialWindow>
+        <content>FlashToOutput.swf</content>
+        <systemChrome>none</systemChrome>
+        <transparent>false</transparent>
+        <visible>false</visible>
+        <fullScreen>false</fullScreen>
+        <autoOrients>false</autoOrients>
+        <renderMode>direct</renderMode>
+        <maximizable>true</maximizable>
+        <minimizable>true</minimizable>
+        <resizable>true</resizable>
+    </initialWindow>
+    <allowBrowserInvocation>false</allowBrowserInvocation>
+    <supportedProfiles>extendedDesktop</supportedProfiles>
+    <fileTypes>
+        <fileType>
+            <name>FlashSWF</name>
+            <extension>swf</extension>
+            <description>Flash SWF Animation</description>
+            <contentType>application/x-shockwave-flash</contentType>
+        </fileType>
+    </fileTypes>
+    <customUpdateUI>false</customUpdateUI>
+    <copyright></copyright>
+    <description></description>
+</application>
