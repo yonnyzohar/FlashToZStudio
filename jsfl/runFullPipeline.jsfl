@@ -75,7 +75,8 @@
                     var el = elems[ei];
                     if (el.elementType === "instance" &&
                         el.libraryItem  &&
-                        el.libraryItem.itemType === "movie clip" &&
+                        (el.libraryItem.itemType === "movie clip" ||
+                         el.libraryItem.itemType === "graphic") &&
                         !seen[el.libraryItem.name]) {
                         seen[el.libraryItem.name] = true;
                         result.push(el.libraryItem.name);

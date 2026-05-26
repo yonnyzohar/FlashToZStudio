@@ -280,6 +280,7 @@
         // distributeToLayers() so each element is moved to its own layer.
         // Loop until no multi-element keyframes remain in this MC.
         var sepAgain = true;
+        var lastSepPos = "";  // detect stalls: same position found twice = no progress
         while (sepAgain) {
             sepAgain = false;
             lib.editItem(parentMCName);
@@ -296,14 +297,37 @@
                 }
             }
             if (sepFndLyr < 0) { doc.exitEditMode(); break; }
+
+            // If the same position comes up twice, distributeToLayers made no
+            // progress (e.g. shape/vector elements that cannot be distributed).
+            var sepPos = sepFndLyr + "_" + sepFndFrm;
+            if (sepPos === lastSepPos) {
+                fl.trace("[WARN] distributeToLayers made no progress at layer " + sepFndLyr +
+                         " frame " + sepFndFrm + " of '" + parentMCName + "' — skipping");
+                doc.exitEditMode();
+                break;
+            }
+            lastSepPos = sepPos;
+
             sepTL.currentLayer = sepFndLyr;
             sepTL.currentFrame = sepFndFrm;
             var sepKfEl = sepTL.layers[sepFndLyr].frames[sepFndFrm].elements;
             var sepSel = [];
             for (var sepEi = 0; sepEi < sepKfEl.length; sepEi++) sepSel.push(sepKfEl[sepEi]);
             doc.selection = sepSel;
-            doc.distributeToLayers();
+            var dtlOk = false;
+            if (typeof doc.distributeToLayers === "function") {
+                try {
+                    doc.distributeToLayers();
+                    dtlOk = true;
+                } catch (dtlErr) {
+                    fl.trace("[WARN] distributeToLayers() unavailable for '" + parentMCName + "': " + dtlErr);
+                }
+            } else {
+                fl.trace("[WARN] distributeToLayers not defined — skipping layer separation for '" + parentMCName + "'");
+            }
             doc.exitEditMode();
+            if (!dtlOk) break;
             sepAgain = true;
             separatedLayerCount++;
             fl.trace("[SEPARATE]  '" + parentMCName + "': layer " + sepFndLyr +

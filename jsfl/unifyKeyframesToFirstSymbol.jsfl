@@ -266,7 +266,18 @@
             targetInstanceName = targetInstanceName || deriveName(targetItemName);
 
             if (symItem.itemType !== "movie clip") {
-                symItem.itemType = "movie clip";
+                // itemType is read-only; symbolType is the writable property.
+                // linkageExportForAS silently locks symbolType, so disable it first.
+                var su_export = !!symItem.linkageExportForAS;
+                var su_id     = symItem.linkageIdentifier || "";
+                var su_ff     = !!symItem.linkageExportInFirstFrame;
+                if (su_export) symItem.linkageExportForAS = false;
+                symItem.symbolType = "movie clip";
+                if (su_export && su_id) {
+                    symItem.linkageExportForAS        = true;
+                    try { symItem.linkageIdentifier   = su_id; } catch(e) {}
+                    symItem.linkageExportInFirstFrame = su_ff;
+                }
                 fl.trace("  [LIB FIX] '" + targetItemName + "': Graphic → MovieClip");
             }
             if (!symItem.linkageExportForAS) {
@@ -368,8 +379,23 @@
                 if (el.libraryItem && el.libraryItem.name === targetItemName) {
                     fl.trace("  [KF " + k + "] Already '" + targetItemName + "' — no swap needed");
                 } else {
-                    doc.selection = [el];
-                    doc.swapElement(targetItemName);
+                    // Guard: swapElement throws "Argument number 1 is invalid" when the
+                    // target name doesn't match any library item (e.g. broken ref or stale
+                    // path after a rename).  Also guard against a null libraryItem on el
+                    // (broken instance) which would pass the identity check above but leave
+                    // the selection pointing at an unswappable element.
+                    if (!el.libraryItem) {
+                        fl.trace("  [WARN KF " + k + "] Element has no libraryItem (broken ref) on layer '" + layerName + "' frame " + frameIdx + " — skipping swap");
+                    } else if (!findLibItem(lib, targetItemName)) {
+                        fl.trace("  [WARN KF " + k + "] Target '" + targetItemName + "' not found in library — skipping swap");
+                    } else {
+                        doc.selection = [el];
+                        if (!doc.selection || doc.selection.length === 0) {
+                            fl.trace("  [WARN KF " + k + "] Selection failed on layer '" + layerName + "' frame " + frameIdx + " — skipping swap");
+                        } else {
+                            doc.swapElement(targetItemName);
+                        }
+                    }
                 }
 
             } else {
