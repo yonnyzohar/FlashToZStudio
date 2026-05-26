@@ -104,8 +104,9 @@
     var doc = fl.getDocumentDOM();
     if (!doc) { fl.trace("No document is open."); return; }
 
-    var timeline = doc.getTimeline();
-    var lib      = doc.library;
+    var timeline         = doc.getTimeline();
+    var lib              = doc.library;
+    var usedInstanceNames = {};   // tracks names already assigned in this timeline run
 
     // ── Delete mask and masked layers before any other processing ────────────
     // Collect indices of every mask/masked layer, then delete from the highest
@@ -132,6 +133,120 @@
     for (var uli = 0; uli < timeline.layers.length; uli++) {
         timeline.layers[uli].locked = false;
     }
+
+    // ── Pre-pass: one element per keyframe ───────────────────────────────────
+    // processLayer only inspects elements[0] per keyframe; extras are silently
+    // skipped and stay as Graphics.  Strategy: read everything first (no
+    // mutations), then delete the extras, then add each to its own new layer.
+    // Clipboard (clipCut/clipPaste) is intentionally avoided — timeline refs go
+    // stale after addNewLayer and paste lands back on the wrong layer.
+    (function separateMultiElementKeyframes() {
+        // Phase 1 — snapshot extra instance elements (read-only, no mutations).
+        var stl = doc.getTimeline();
+        var extras = [];
+        for (var li = 0; li < stl.layers.length; li++) {
+            var lyr = stl.layers[li];
+            for (var fi = 0; fi < lyr.frames.length; fi++) {
+                var frm = lyr.frames[fi];
+                if (frm.startFrame !== fi) continue;
+                for (var ei = 1; ei < frm.elements.length; ei++) {
+                    var el = frm.elements[ei];
+                    if (el.elementType === "instance" && el.libraryItem) {
+                        extras.push({
+                            layerName:   lyr.name,
+                            frameIdx:    fi,
+                            libItemName: el.libraryItem.name,
+                            x:           el.x,
+                            y:           el.y
+                        });
+                    }
+                }
+            }
+        }
+        if (extras.length === 0) return;
+        fl.trace("  [PRE-SEP] " + extras.length + " extra instance(s) to redistribute");
+
+        // Phase 2 — delete extra instances in place.
+        // Only element counts change here, not layer counts, so indices are stable.
+        stl = doc.getTimeline();
+        for (var li2 = 0; li2 < stl.layers.length; li2++) {
+            var lyr2 = stl.layers[li2];
+            lyr2.locked  = false;
+            lyr2.visible = true;
+            for (var fi2 = 0; fi2 < lyr2.frames.length; fi2++) {
+                var frm2 = lyr2.frames[fi2];
+                if (frm2.startFrame !== fi2) continue;
+                var toDelete = [];
+                for (var ei2 = 1; ei2 < frm2.elements.length; ei2++) {
+                    var el2 = frm2.elements[ei2];
+                    if (el2.elementType === "instance" && el2.libraryItem) {
+                        toDelete.push(el2);
+                    }
+                }
+                if (toDelete.length === 0) continue;
+                stl.currentLayer = li2;
+                stl.currentFrame = fi2;
+                doc.selection = toDelete;
+                doc.deleteSelection();
+            }
+        }
+
+        // Phase 3 — add each extra to its own new layer.
+        // addNewLayer shifts indices so re-look up the parent layer by name each time.
+        for (var xi = 0; xi < extras.length; xi++) {
+            var ex = extras[xi];
+            var libItem = findLibItem(lib, ex.libItemName);
+            if (!libItem) {
+                fl.trace("  [PRE-SEP WARN] item not in library: '" + ex.libItemName + "'");
+                continue;
+            }
+            stl = doc.getTimeline();
+            var li3 = -1;
+            for (var lj = 0; lj < stl.layers.length; lj++) {
+                if (stl.layers[lj].name === ex.layerName) { li3 = lj; break; }
+            }
+            if (li3 < 0) {
+                fl.trace("  [PRE-SEP WARN] layer not found: '" + ex.layerName + "'");
+                continue;
+            }
+            stl.currentLayer = li3;
+            stl.addNewLayer("", "normal", true); // inserts at li3; original → li3+1
+            stl = doc.getTimeline();             // re-fetch so currentLayer is fresh
+            stl.currentLayer = li3;
+            stl.currentFrame = ex.frameIdx;
+            if (ex.frameIdx > 0) stl.insertBlankKeyframe(ex.frameIdx);
+            doc.addItem({ x: ex.x, y: ex.y }, libItem);
+            fl.trace("  [PRE-SEP] '" + ex.layerName + "' frame " + ex.frameIdx +
+                     ": '" + ex.libItemName + "' → new layer");
+        }
+
+        // Unlock all layers (addNewLayer may leave new layers locked).
+        stl = doc.getTimeline();
+        for (var ul = 0; ul < stl.layers.length; ul++) stl.layers[ul].locked = false;
+    })();
+    timeline = doc.getTimeline(); // re-fetch after pre-pass may have added layers
+
+    // ── De-duplicate layer names ──────────────────────────────────────────────
+    // processLayer looks up layers by name; when two layers share a name,
+    // findLayerByName always returns the first match — the second layer is
+    // processed twice while the duplicate is silently skipped (e.g. two
+    // 'Pig_Pupil' layers means one never gets an instance name).
+    (function deduplicateLayerNames() {
+        var stl  = doc.getTimeline();
+        var seen = {};
+        for (var i = 0; i < stl.layers.length; i++) {
+            var n = stl.layers[i].name;
+            if (seen[n] === undefined) {
+                seen[n] = 0;
+            } else {
+                seen[n]++;
+                var uname = n + "_" + seen[n];
+                stl.layers[i].name = uname;
+                fl.trace("  [DEDUP] '" + n + "' → '" + uname + "'");
+            }
+        }
+    })();
+    timeline = doc.getTimeline();
 
     // Build selectedIndices from ALL remaining layers.
     // We do this explicitly (rather than calling getSelectedLayers) because
@@ -310,6 +425,15 @@
             fl.trace("  [SYMBOL] Using '" + targetItemName +
                      "'  instance='" + targetInstanceName + "'");
         }
+
+        // Ensure the instance name is unique within this timeline.
+        if (usedInstanceNames[targetInstanceName]) {
+            var suffix = 1;
+            while (usedInstanceNames[targetInstanceName + suffix]) suffix++;
+            targetInstanceName = targetInstanceName + suffix;
+            fl.trace("  [UNIQUE] Renamed instance to '" + targetInstanceName + "' to avoid collision");
+        }
+        usedInstanceNames[targetInstanceName] = true;
 
         // ── Phase 2: stage work ───────────────────────────────────────────────
         //

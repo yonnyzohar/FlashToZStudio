@@ -133,21 +133,28 @@
 
     // ── entry point ───────────────────────────────────────────────────────────
 
+    // Pass 1 must run BEFORE the unify traversal so that every library item is
+    // already a MovieClip when unifyKeyframesToFirstSymbol runs.  Without this,
+    // a Graphic that appears in two parent timelines gets converted while
+    // processing the first parent, but the second parent sees it as "already MC"
+    // and may fail to set the instance name due to stale element references.
+    // Running convertLibraryToMovieClips first converts every Graphic atomically
+    // (library-wide), so the unify traversal always starts with all-MC items.
     fl.trace("════════════════════════════════════════");
-    fl.trace("Full Pipeline — pass 1: unify all timelines");
+    fl.trace("Full Pipeline — pass 1: convertLibraryToMovieClips");
+    fl.trace("════════════════════════════════════════");
+    doc.exitEditMode();
+    fl.runScript(convertScript);
+
+    doc.exitEditMode();
+
+    fl.trace("════════════════════════════════════════");
+    fl.trace("Full Pipeline — pass 2: unify all timelines");
     fl.trace("════════════════════════════════════════");
 
     // Always start from the root scene.
     doc.exitEditMode();
     processTimeline(0, "Scene (root)");
-
-    // Make sure we are back at the root before the library conversion.
-    doc.exitEditMode();
-
-    fl.trace("════════════════════════════════════════");
-    fl.trace("Full Pipeline — pass 2: convertLibraryToMovieClips");
-    fl.trace("════════════════════════════════════════");
-    fl.runScript(convertScript);
 
     doc.exitEditMode();
     fl.trace("════════════════════════════════════════");
