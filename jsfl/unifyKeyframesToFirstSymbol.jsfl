@@ -108,26 +108,75 @@
     var lib              = doc.library;
     var usedInstanceNames = {};   // tracks names already assigned in this timeline run
 
-    // ── Delete mask and masked layers before any other processing ────────────
-    // Collect indices of every mask/masked layer, then delete from the highest
-    // index downward so earlier indices are not invalidated by each removal.
-    var maskIndicesToDelete = [];
+    // Linkage APIs are not supported on HTML5 Canvas / WebGL docs.
+    // Detected at runtime: the first write that throws sets supportsLinkage = false.
+    var supportsLinkage = true;
+
+    // ── Delete mask and guide layers before any other processing ─────────────
+    // mask  = the clipping shape layer; deleting it causes Animate to
+    //         automatically promote the layers beneath it ("masked") back to
+    //         normal — their MC content is preserved and processed below.
+    // guide = motion path guide layers (vector paths, no instances to export)
+    // Collect indices then delete from highest downward so earlier indices
+    // are not invalidated by each removal.
+    var layersToDelete = [];
     for (var mdi = 0; mdi < timeline.layers.length; mdi++) {
         var ltype = timeline.layers[mdi].layerType;
-        if (ltype === "mask") {
-            maskIndicesToDelete.push(mdi);
+        if (ltype === "mask" || ltype === "guide") {
+            layersToDelete.push(mdi);
         }
     }
-    // Sort descending so deletions don't shift remaining indices.
-    maskIndicesToDelete.sort(function(a, b) { return b - a; });
-    for (var mdi2 = 0; mdi2 < maskIndicesToDelete.length; mdi2++) {
-        fl.trace("  [DELETE MASK] Removing layer " + maskIndicesToDelete[mdi2] +
-                 " ('" + timeline.layers[maskIndicesToDelete[mdi2]].name + "'" +
-                 " type=" + timeline.layers[maskIndicesToDelete[mdi2]].layerType + ")");
-        timeline.deleteLayer(maskIndicesToDelete[mdi2]);
+    layersToDelete.sort(function(a, b) { return b - a; });
+    for (var mdi2 = 0; mdi2 < layersToDelete.length; mdi2++) {
+        fl.trace("  [DELETE LAYER] Removing layer " + layersToDelete[mdi2] +
+                 " ('" + timeline.layers[layersToDelete[mdi2]].name + "'" +
+                 " type=" + timeline.layers[layersToDelete[mdi2]].layerType + ")");
+        timeline.deleteLayer(layersToDelete[mdi2]);
     }
-    // Re-fetch timeline after deletions.
     timeline = doc.getTimeline();
+
+    // ── Delete shape-tween and decorative vector layers ──────────────────────
+    // Only runs when the timeline already has at least one instance-bearing
+    // layer.  This guards leaf symbols (e.g. Pig_torso — a Graphic whose
+    // entire content is a single drawn shape) from having their only layer
+    // deleted.  In a parent timeline that mixes MC instances with a shape-tween
+    // layer (e.g. hair on Bicycle), the shape-only layer is removed because
+    // ZStudio cannot export raw vector shapes that live alongside instances.
+    var tlHasInstance = false;
+    for (var thi = 0; thi < timeline.layers.length && !tlHasInstance; thi++) {
+        var thLyr = timeline.layers[thi];
+        for (var thFi = 0; thFi < thLyr.frames.length && !tlHasInstance; thFi++) {
+            if (thLyr.frames[thFi].startFrame !== thFi) continue;
+            var thElems = thLyr.frames[thFi].elements;
+            for (var thEi = 0; thEi < thElems.length; thEi++) {
+                if (thElems[thEi].elementType === "instance") { tlHasInstance = true; break; }
+            }
+        }
+    }
+
+    if (tlHasInstance) {
+        var shapeLayerIndices = [];
+        for (var shi = 0; shi < timeline.layers.length; shi++) {
+            var shLyr = timeline.layers[shi];
+            var shHasShape = false, shHasInstance = false;
+            for (var shFi = 0; shFi < shLyr.frames.length; shFi++) {
+                if (shLyr.frames[shFi].startFrame !== shFi) continue;
+                var shElems = shLyr.frames[shFi].elements;
+                for (var shEi = 0; shEi < shElems.length; shEi++) {
+                    if (shElems[shEi].elementType === "shape")    shHasShape    = true;
+                    if (shElems[shEi].elementType === "instance") shHasInstance = true;
+                }
+            }
+            if (shHasShape && !shHasInstance) shapeLayerIndices.push(shi);
+        }
+        shapeLayerIndices.sort(function(a, b) { return b - a; });
+        for (var shi2 = 0; shi2 < shapeLayerIndices.length; shi2++) {
+            fl.trace("  [DELETE SHAPE] Removing shape layer " + shapeLayerIndices[shi2] +
+                     " ('" + timeline.layers[shapeLayerIndices[shi2]].name + "')");
+            timeline.deleteLayer(shapeLayerIndices[shi2]);
+        }
+        timeline = doc.getTimeline();
+    }
 
     // ── Unlock every layer so stage operations reach all of them ─────────────
     for (var uli = 0; uli < timeline.layers.length; uli++) {
@@ -140,7 +189,7 @@
     // mutations), then delete the extras, then add each to its own new layer.
     // Clipboard (clipCut/clipPaste) is intentionally avoided — timeline refs go
     // stale after addNewLayer and paste lands back on the wrong layer.
-    (function separateMultiElementKeyframes() {
+    var _tooComplex = (function separateMultiElementKeyframes() {
         // Phase 1 — snapshot extra instance elements (read-only, no mutations).
         var stl = doc.getTimeline();
         var extras = [];
@@ -163,7 +212,18 @@
                 }
             }
         }
-        if (extras.length === 0) return;
+        if (extras.length === 0) return false;
+
+        // If there are too many extras this is a frame-by-frame animation where
+        // every keyframe holds all body-part instances on one layer.  Our approach
+        // of creating one new layer per extra would timeout Animate's watchdog and
+        // produce an unworkable structure anyway — skip this timeline entirely.
+        var MAX_EXTRAS = 30;
+        if (extras.length > MAX_EXTRAS) {
+            fl.trace("  [PRE-SEP] " + extras.length + " extras exceeds limit (" + MAX_EXTRAS +
+                     ") — frame-by-frame animation, skipping this timeline.");
+            return true;  // signal: caller should abort
+        }
         fl.trace("  [PRE-SEP] " + extras.length + " extra instance(s) to redistribute");
 
         // Phase 2 — delete extra instances in place.
@@ -223,7 +283,9 @@
         // Unlock all layers (addNewLayer may leave new layers locked).
         stl = doc.getTimeline();
         for (var ul = 0; ul < stl.layers.length; ul++) stl.layers[ul].locked = false;
+        return false;  // normal completion — caller proceeds
     })();
+    if (_tooComplex) return;  // timeline is frame-by-frame animation — leave it untouched
     timeline = doc.getTimeline(); // re-fetch after pre-pass may have added layers
 
     // ── De-duplicate layer names ──────────────────────────────────────────────
@@ -383,19 +445,19 @@
             if (symItem.itemType !== "movie clip") {
                 // itemType is read-only; symbolType is the writable property.
                 // linkageExportForAS silently locks symbolType, so disable it first.
-                var su_export = !!symItem.linkageExportForAS;
-                var su_id     = symItem.linkageIdentifier || "";
-                var su_ff     = !!symItem.linkageExportInFirstFrame;
+                var su_export = supportsLinkage ? !!symItem.linkageExportForAS      : false;
+                var su_id     = supportsLinkage ? (symItem.linkageIdentifier || "") : "";
+                var su_ff     = supportsLinkage ? !!symItem.linkageExportInFirstFrame : false;
                 if (su_export) symItem.linkageExportForAS = false;
                 symItem.symbolType = "movie clip";
-                if (su_export && su_id) {
+                if (supportsLinkage && su_export && su_id) {
                     symItem.linkageExportForAS        = true;
                     try { symItem.linkageIdentifier   = su_id; } catch(e) {}
                     symItem.linkageExportInFirstFrame = su_ff;
                 }
                 fl.trace("  [LIB FIX] '" + targetItemName + "': Graphic → MovieClip");
             }
-            if (!symItem.linkageExportForAS) {
+            if (supportsLinkage && !symItem.linkageExportForAS) {
                 // Guard against case-insensitive collision: when linkageExportForAS
                 // is set to true, Animate auto-assigns linkageIdentifier = symItem.name.
                 // If any existing identifier matches that name case-insensitively,
@@ -413,10 +475,15 @@
                 }
                 if (!ciCollide) {
                     var lId = uniqueLinkageId(lib, deriveLinkageName(targetItemName));
-                    symItem.linkageExportForAS        = true;
-                    symItem.linkageIdentifier         = lId;
-                    symItem.linkageExportInFirstFrame = true;
-                    fl.trace("  [LINKAGE] '" + targetItemName + "' → '" + lId + "'");
+                    try {
+                        symItem.linkageExportForAS        = true;
+                        symItem.linkageIdentifier         = lId;
+                        symItem.linkageExportInFirstFrame = true;
+                        fl.trace("  [LINKAGE] '" + targetItemName + "' → '" + lId + "'");
+                    } catch(lkErr) {
+                        supportsLinkage = false;
+                        fl.trace("  [INFO] Linkage not supported — skipping all further linkage. (" + lkErr.message + ")");
+                    }
                 } else {
                     fl.trace("  [LINKAGE DEFER] '" + targetItemName +
                              "' — name collides case-insensitively, deferred to convertLibraryToMovieClips");
@@ -481,17 +548,19 @@
                 layer = timeline.layers[layerIndex];
 
                 // Set linkage on the freshly created MC
-                var newMC = findLibItem(lib, bitmapMCName);
-                if (newMC) {
-                    newMC.linkageExportForAS = true;
-                    var bLinkId = uniqueLinkageId(lib, deriveLinkageName(bitmapLibName));
-                    try {
-                        newMC.linkageIdentifier = bLinkId;
-                    } catch (e) {
-                        bLinkId = newMC.linkageIdentifier || bitmapMCName;
+                if (supportsLinkage) {
+                    var newMC = findLibItem(lib, bitmapMCName);
+                    if (newMC) {
+                        newMC.linkageExportForAS = true;
+                        var bLinkId = uniqueLinkageId(lib, deriveLinkageName(bitmapLibName));
+                        try {
+                            newMC.linkageIdentifier = bLinkId;
+                        } catch (e) {
+                            bLinkId = newMC.linkageIdentifier || bitmapMCName;
+                        }
+                        newMC.linkageExportInFirstFrame = true;
+                        fl.trace("  [LINKAGE] '" + bitmapMCName + "' → '" + bLinkId + "'");
                     }
-                    newMC.linkageExportInFirstFrame = true;
-                    fl.trace("  [LINKAGE] '" + bitmapMCName + "' → '" + bLinkId + "'");
                 }
 
                 // convertToSymbol already placed the MC at the right position;

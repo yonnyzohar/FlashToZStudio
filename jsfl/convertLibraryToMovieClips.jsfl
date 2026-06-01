@@ -12,6 +12,11 @@
 
     var lib = doc.library;
 
+    // Linkage APIs (linkageIdentifier etc.) are not supported on HTML5 Canvas / WebGL docs.
+    // We detect this at runtime: the first write that throws sets supportsLinkage = false,
+    // and the Step-3 gate (if ... && supportsLinkage) then skips all subsequent items.
+    var supportsLinkage = true;
+
     // Sanitise a library item name into a valid AS3 class identifier.
     // Strips folder paths and file extensions, replaces illegal characters,
     // and capitalises the first letter (e.g. for linkage class names).
@@ -96,12 +101,12 @@
             lib.selectItem(item.name);
             // linkageExportForAS = true silently locks itemType — disable it
             // first, change the type, then restore the linkage settings.
-            var g_linkage    = item.linkageIdentifier         || "";
-            var g_export     = !!item.linkageExportForAS;
-            var g_firstFrame = !!item.linkageExportInFirstFrame;
+            var g_linkage    = supportsLinkage ? (item.linkageIdentifier      || "") : "";
+            var g_export     = supportsLinkage ? !!item.linkageExportForAS          : false;
+            var g_firstFrame = supportsLinkage ? !!item.linkageExportInFirstFrame   : false;
             if (g_export) item.linkageExportForAS = false;
             item.symbolType = "movie clip";
-            if (g_export && g_linkage) {
+            if (supportsLinkage && g_export && g_linkage) {
                 item.linkageExportForAS        = true;
                 try { item.linkageIdentifier   = g_linkage; } catch(e) {}
                 item.linkageExportInFirstFrame = g_firstFrame;
@@ -121,6 +126,11 @@
             var desired = lowercaseBaseName(item.name);
             if (desired !== item.name) {
                 var oldName = item.name;
+                // Keep justConverted in sync so the renamed item stays excluded from Step 4.
+                if (justConverted[oldName]) {
+                    justConverted[desired] = true;
+                    delete justConverted[oldName];
+                }
                 item.name = desired;
                 // Update our name snapshot so later findItem still works
                 itemNames[j] = desired;
@@ -132,7 +142,7 @@
         }
 
         // ── Step 3: ensure every MovieClip has a linkage identifier ──────
-        if (item.itemType === "movie clip") {
+        if (item.itemType === "movie clip" && supportsLinkage) {
             var currentId = (item.linkageIdentifier || "").replace(/^\s+|\s+$/g, "");
 
             if (currentId === "" || !item.linkageExportForAS) {
@@ -172,13 +182,20 @@
 
                 // Enable export first so linkageIdentifier becomes writable,
                 // then set the identifier, then enable first-frame export.
-                item.linkageExportForAS        = true;
-                item.linkageIdentifier         = wanted;
-                item.linkageExportInFirstFrame = true;
-
-                usedIds[wanted] = true;
-                linkageCount++;
-                fl.trace("[LINKAGE]   '" + item.name + "' → identifier: '" + wanted + "'");
+                // Wrap in try/catch: linkageIdentifier throws on HTML5 Canvas docs.
+                // On first throw, set supportsLinkage = false so the outer gate
+                // (if ... && supportsLinkage) skips all remaining items.
+                try {
+                    item.linkageExportForAS        = true;
+                    item.linkageIdentifier         = wanted;
+                    item.linkageExportInFirstFrame = true;
+                    usedIds[wanted] = true;
+                    linkageCount++;
+                    fl.trace("[LINKAGE]   '" + item.name + "' → identifier: '" + wanted + "'");
+                } catch(lkErr) {
+                    supportsLinkage = false;
+                    fl.trace("[INFO] Linkage not supported — skipping all further linkage. (" + lkErr.message + ")");
+                }
             } else {
                 // Linkage exists — strip underscores and ensure first letter is upper-case
                 var cleanedId = currentId.replace(/_/g, "");
@@ -188,22 +205,26 @@
                     // Free the old slot before checking whether the cleaned form is available.
                     delete usedIds[currentId];
                     if (!usedIds[fixedId]) {
-                        item.linkageExportForAS = false;
-                        item.linkageExportForAS = true;
-                        item.linkageIdentifier         = fixedId;
-                        item.linkageExportInFirstFrame = true;
-                        usedIds[fixedId] = true;
-                        linkageCount++;
-                        fl.trace("[FIX ID]    '" + item.name + "' linkage '" + currentId + "' → '" + fixedId + "'");
+                        try {
+                            item.linkageExportForAS = false;
+                            item.linkageExportForAS = true;
+                            item.linkageIdentifier         = fixedId;
+                            item.linkageExportInFirstFrame = true;
+                            usedIds[fixedId] = true;
+                            linkageCount++;
+                            fl.trace("[FIX ID]    '" + item.name + "' linkage '" + currentId + "' → '" + fixedId + "'");
+                        } catch(lkErr) { supportsLinkage = false; }
                     } else {
                         var suffixed = uniqueIdentifier(usedIds, fixedId);
-                        item.linkageExportForAS = false;
-                        item.linkageExportForAS = true;
-                        item.linkageIdentifier         = suffixed;
-                        item.linkageExportInFirstFrame = true;
-                        usedIds[suffixed] = true;
-                        linkageCount++;
-                        fl.trace("[FIX ID]    '" + item.name + "' linkage '" + currentId + "' → '" + suffixed + "' (collided with '" + fixedId + "')");
+                        try {
+                            item.linkageExportForAS = false;
+                            item.linkageExportForAS = true;
+                            item.linkageIdentifier         = suffixed;
+                            item.linkageExportInFirstFrame = true;
+                            usedIds[suffixed] = true;
+                            linkageCount++;
+                            fl.trace("[FIX ID]    '" + item.name + "' linkage '" + currentId + "' → '" + suffixed + "' (collided with '" + fixedId + "')");
+                        } catch(lkErr) { supportsLinkage = false; }
                     }
                 } else {
                     skippedCount++;
@@ -280,8 +301,11 @@
         // distributeToLayers() so each element is moved to its own layer.
         // Loop until no multi-element keyframes remain in this MC.
         var sepAgain = true;
-        var lastSepPos = "";  // detect stalls: same position found twice = no progress
-        while (sepAgain) {
+        var seenSepPos = {};   // every position we have already attempted to distribute
+        var sepIterations = 0;
+        var MAX_SEP_ITER = 200;
+        while (sepAgain && sepIterations < MAX_SEP_ITER) {
+            sepIterations++;
             sepAgain = false;
             lib.editItem(parentMCName);
             var sepTL = doc.getTimeline();
@@ -290,7 +314,11 @@
                 for (var sepFi = 0; sepFi < sepTL.layers[sepLi].frames.length && sepFndLyr < 0; sepFi++) {
                     var sepKf = sepTL.layers[sepLi].frames[sepFi];
                     if (sepKf.startFrame !== sepFi) continue;
-                    if (sepKf.elements.length > 1) {
+                    var sepInstCount = 0;
+                    for (var sepEiC = 0; sepEiC < sepKf.elements.length; sepEiC++) {
+                        if (sepKf.elements[sepEiC].elementType === "instance") sepInstCount++;
+                    }
+                    if (sepInstCount > 1) {
                         sepFndLyr = sepLi;
                         sepFndFrm = sepFi;
                     }
@@ -298,16 +326,16 @@
             }
             if (sepFndLyr < 0) { doc.exitEditMode(); break; }
 
-            // If the same position comes up twice, distributeToLayers made no
-            // progress (e.g. shape/vector elements that cannot be distributed).
+            // If we have already attempted this exact position, distributeToLayers
+            // made no progress (e.g. shape/vector elements that cannot be distributed).
             var sepPos = sepFndLyr + "_" + sepFndFrm;
-            if (sepPos === lastSepPos) {
+            if (seenSepPos[sepPos]) {
                 fl.trace("[WARN] distributeToLayers made no progress at layer " + sepFndLyr +
                          " frame " + sepFndFrm + " of '" + parentMCName + "' — skipping");
                 doc.exitEditMode();
                 break;
             }
-            lastSepPos = sepPos;
+            seenSepPos[sepPos] = true;
 
             sepTL.currentLayer = sepFndLyr;
             sepTL.currentFrame = sepFndFrm;
@@ -332,6 +360,9 @@
             separatedLayerCount++;
             fl.trace("[SEPARATE]  '" + parentMCName + "': layer " + sepFndLyr +
                      " frame " + sepFndFrm + " → distributed to individual layers");
+        }
+        if (sepIterations >= MAX_SEP_ITER) {
+            fl.trace("[WARN] distributeToLayers hit MAX_SEP_ITER for '" + parentMCName + "' — aborting separation");
         }
 
         // ── Read pass ──────────────────────────────────────────────────────
@@ -475,16 +506,18 @@
         }
 
         // ── Set linkage on all new wrapper MCs ─────────────────────────────
-        for (var nw = 0; nw < newWrapperNames.length; nw++) {
-            var nwItem = findItem(newWrapperNames[nw]);
-            if (!nwItem) continue;
-            var lwId = uniqueLinkageIdLocal(toIdentifier(newWrapperNames[nw]));
-            nwItem.linkageExportForAS        = true;
-            try { nwItem.linkageIdentifier   = lwId; } catch(e) {
-                lwId = nwItem.linkageIdentifier || newWrapperNames[nw];
+        if (supportsLinkage) {
+            for (var nw = 0; nw < newWrapperNames.length; nw++) {
+                var nwItem = findItem(newWrapperNames[nw]);
+                if (!nwItem) continue;
+                var lwId = uniqueLinkageIdLocal(toIdentifier(newWrapperNames[nw]));
+                nwItem.linkageExportForAS        = true;
+                try { nwItem.linkageIdentifier   = lwId; } catch(e) {
+                    lwId = nwItem.linkageIdentifier || newWrapperNames[nw];
+                }
+                nwItem.linkageExportInFirstFrame = true;
+                fl.trace("[INNER LINK] '" + newWrapperNames[nw] + "' → '" + lwId + "'");
             }
-            nwItem.linkageExportInFirstFrame = true;
-            fl.trace("[INNER LINK] '" + newWrapperNames[nw] + "' → '" + lwId + "'");
         }
     }
 
@@ -499,12 +532,12 @@
         var rcItem = lib.items[rc];
         if (rcItem.itemType === "graphic") {
             lib.selectItem(rcItem.name);
-            var rc_linkage    = rcItem.linkageIdentifier         || "";
-            var rc_export     = !!rcItem.linkageExportForAS;
-            var rc_firstFrame = !!rcItem.linkageExportInFirstFrame;
+            var rc_linkage    = supportsLinkage ? (rcItem.linkageIdentifier    || "") : "";
+            var rc_export     = supportsLinkage ? !!rcItem.linkageExportForAS         : false;
+            var rc_firstFrame = supportsLinkage ? !!rcItem.linkageExportInFirstFrame  : false;
             if (rc_export) rcItem.linkageExportForAS = false;
             rcItem.symbolType = "movie clip";
-            if (rc_export && rc_linkage) {
+            if (supportsLinkage && rc_export && rc_linkage) {
                 rcItem.linkageExportForAS        = true;
                 try { rcItem.linkageIdentifier   = rc_linkage; } catch(e) {}
                 rcItem.linkageExportInFirstFrame = rc_firstFrame;
