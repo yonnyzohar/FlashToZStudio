@@ -13,9 +13,8 @@
     var lib = doc.library;
 
     // Linkage APIs (linkageIdentifier etc.) are not supported on HTML5 Canvas / WebGL docs.
-    // We detect this at runtime: the first write that throws sets supportsLinkage = false,
-    // and the Step-3 gate (if ... && supportsLinkage) then skips all subsequent items.
-    var supportsLinkage = true;
+    // Detect up-front via doc.type so even reads of linkageIdentifier are skipped.
+    var supportsLinkage = (doc.type === "timeline");
 
     // Sanitise a library item name into a valid AS3 class identifier.
     // Strips folder paths and file extensions, replaces illegal characters,
@@ -55,10 +54,12 @@
 
     // Collect all identifiers already in use so we can avoid collisions.
     var usedIds = {};
-    var items = lib.items;
-    for (var i = 0; i < items.length; i++) {
-        var id = items[i].linkageIdentifier;
-        if (id && id !== "") usedIds[id] = true;
+    if (supportsLinkage) {
+        var items0 = lib.items;
+        for (var i0 = 0; i0 < items0.length; i0++) {
+            var id0 = items0[i0].linkageIdentifier;
+            if (id0 && id0 !== "") usedIds[id0] = true;
+        }
     }
 
     var convertedCount = 0;
@@ -294,6 +295,28 @@
 
     for (var emi = 0; emi < existingMCNames.length; emi++) {
         var parentMCName = existingMCNames[emi];
+
+        // Skip shape-only MCs: they contain no instances so neither the
+        // separator nor the bitmap-wrapper have anything to do.  More
+        // importantly, calling lib.editItem on a Graphic-turned-MC can
+        // reload the on-disk Graphic state and corrupt the shape content.
+        var skipItem = findItem(parentMCName);
+        if (skipItem && skipItem.timeline) {
+            var skipTL = skipItem.timeline;
+            var hasInst = false;
+            for (var ski = 0; ski < skipTL.layers.length && !hasInst; ski++) {
+                var skFrames = skipTL.layers[ski].frames;
+                for (var skf = 0; skf < skFrames.length && !hasInst; skf++) {
+                    if (skFrames[skf].startFrame !== skf) continue;
+                    for (var ske = 0; ske < skFrames[skf].elements.length; ske++) {
+                        if (skFrames[skf].elements[ske].elementType === "instance") {
+                            hasInst = true; break;
+                        }
+                    }
+                }
+            }
+            if (!hasInst) continue;
+        }
 
         // ── Sub-pass: one element per layer ────────────────────────────────
         // Repeatedly find the first keyframe that holds more than one element

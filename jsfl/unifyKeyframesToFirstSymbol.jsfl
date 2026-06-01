@@ -58,6 +58,45 @@
         return s;
     }
 
+    // Returns true when a library item is a PuppetShape-style symbol.
+    // PuppetShape symbols have exactly 1 layer, frame 0 holds an instance
+    // (the undeformed WarpedAsset base), and frame 1 holds a raw DOMShape
+    // (the puppet mesh placeholder).
+    function isPuppetLibItem(item) {
+        if (!item || !item.timeline) return false;
+        var tl = item.timeline;
+        if (tl.layers.length !== 1) return false;
+        var frames = tl.layers[0].frames;
+        if (frames.length < 2) return false;
+        if (frames[0].startFrame !== 0 || frames[1].startFrame !== 1) return false;
+        return (frames[0].elements.length > 0 &&
+                frames[0].elements[0].elementType === "instance" &&
+                frames[1].elements.length > 0 &&
+                frames[1].elements[0].elementType === "shape");
+    }
+
+    // Returns true when a library item's timeline contains a layer that uses
+    // different library symbols across its keyframes (frame-by-frame swap
+    // animation, e.g. a puppet-warp wrapper like Ruby_Hair_Bang that cycles
+    // through PuppetShape_5 copy 1/2/3/4 per keyframe).
+    function isFrameByFrameLibItem(item) {
+        if (!item || !item.timeline) return false;
+        var tl = item.timeline;
+        for (var li = 0; li < tl.layers.length; li++) {
+            var frames = tl.layers[li].frames;
+            var firstName = null;
+            for (var fi = 0; fi < frames.length; fi++) {
+                if (frames[fi].startFrame !== fi) continue;
+                var elems = frames[fi].elements;
+                if (elems.length === 0 || elems[0].elementType !== "instance" || !elems[0].libraryItem) continue;
+                var n = elems[0].libraryItem.name;
+                if (firstName === null) { firstName = n; }
+                else if (n !== firstName) { return true; }
+            }
+        }
+        return false;
+    }
+
     // Returns a name that is free both as a library item name AND as a linkage
     // identifier. When linkageExportForAS is first enabled, Animate auto-sets
     // the identifier = symbol name, so both slots must be vacant to avoid the
@@ -67,8 +106,10 @@
         var ids   = {};
         for (var i = 0; i < lib.items.length; i++) {
             names[lib.items[i].name] = true;
-            var lid = lib.items[i].linkageIdentifier;
-            if (lid && lid !== "") ids[lid] = true;
+            try {
+                var lid = lib.items[i].linkageIdentifier;
+                if (lid && lid !== "") ids[lid] = true;
+            } catch(e) {}
         }
         var candidate = wanted;
         var n = 1;
@@ -90,8 +131,10 @@
     function uniqueLinkageId(lib, wanted) {
         var used = {};
         for (var i = 0; i < lib.items.length; i++) {
-            var id = lib.items[i].linkageIdentifier;
-            if (id && id !== "") used[id] = true;
+            try {
+                var id = lib.items[i].linkageIdentifier;
+                if (id && id !== "") used[id] = true;
+            } catch(e) {}
         }
         if (!used[wanted]) return wanted;
         var n = 1;
@@ -109,8 +152,8 @@
     var usedInstanceNames = {};   // tracks names already assigned in this timeline run
 
     // Linkage APIs are not supported on HTML5 Canvas / WebGL docs.
-    // Detected at runtime: the first write that throws sets supportsLinkage = false.
-    var supportsLinkage = true;
+    // Detect up-front via doc.type so even reads of linkageIdentifier are skipped.
+    var supportsLinkage = (doc.type === "timeline");
 
     // ── Delete mask and guide layers before any other processing ─────────────
     // mask  = the clipping shape layer; deleting it causes Animate to
@@ -178,6 +221,36 @@
         timeline = doc.getTimeline();
     }
 
+    // ── Delete puppet-warp layers ─────────────────────────────────────────────
+    // Layers whose first keyframe instance has symbolType "puppet" use Animate's
+    // Puppet Warp deformation system (each keyframe swaps to a different deformed
+    // PuppetShape variant).  ZStudio cannot export these — delete the layers so
+    // the rest of the character processes cleanly.
+    var puppetLayerIndices = [];
+    for (var pli = 0; pli < timeline.layers.length; pli++) {
+        var plyr = timeline.layers[pli];
+        var isPuppet = false;
+        for (var pfi = 0; pfi < plyr.frames.length && !isPuppet; pfi++) {
+            if (plyr.frames[pfi].startFrame !== pfi) continue;
+            var pelems = plyr.frames[pfi].elements;
+            if (pelems.length > 0 &&
+                pelems[0].elementType === "instance" &&
+                (isPuppetLibItem(pelems[0].libraryItem) ||
+                 isFrameByFrameLibItem(pelems[0].libraryItem))) {
+                isPuppet = true;
+            }
+            break; // only need the first keyframe
+        }
+        if (isPuppet) puppetLayerIndices.push(pli);
+    }
+    puppetLayerIndices.sort(function(a, b) { return b - a; });
+    for (var pli2 = 0; pli2 < puppetLayerIndices.length; pli2++) {
+        fl.trace("  [DELETE PUPPET] Removing puppet-warp layer " + puppetLayerIndices[pli2] +
+                 " ('" + timeline.layers[puppetLayerIndices[pli2]].name + "')");
+        timeline.deleteLayer(puppetLayerIndices[pli2]);
+    }
+    timeline = doc.getTimeline();
+
     // ── Unlock every layer so stage operations reach all of them ─────────────
     for (var uli = 0; uli < timeline.layers.length; uli++) {
         timeline.layers[uli].locked = false;
@@ -198,15 +271,29 @@
             for (var fi = 0; fi < lyr.frames.length; fi++) {
                 var frm = lyr.frames[fi];
                 if (frm.startFrame !== fi) continue;
-                for (var ei = 1; ei < frm.elements.length; ei++) {
+                // Find the first instance in this frame at any index.
+                // Frames like the Bicycle layer have shapes before their
+                // first instance, so we can't assume elements[0] is an instance.
+                var p1fi = -1;
+                for (var p1i = 0; p1i < frm.elements.length; p1i++) {
+                    if (frm.elements[p1i].elementType === "instance" &&
+                        frm.elements[p1i].libraryItem) { p1fi = p1i; break; }
+                }
+                if (p1fi < 0) continue; // no instances — nothing to extract
+                // Collect every OTHER instance as an extra to be moved to its own layer.
+                for (var ei = 0; ei < frm.elements.length; ei++) {
+                    if (ei === p1fi) continue;
                     var el = frm.elements[ei];
                     if (el.elementType === "instance" && el.libraryItem) {
+                        var em = el.matrix;
                         extras.push({
                             layerName:   lyr.name,
                             frameIdx:    fi,
                             libItemName: el.libraryItem.name,
                             x:           el.x,
-                            y:           el.y
+                            y:           el.y,
+                            ma: em.a, mb: em.b, mc: em.c, md: em.d,
+                            mtx: em.tx, mty: em.ty
                         });
                     }
                 }
@@ -236,24 +323,49 @@
             for (var fi2 = 0; fi2 < lyr2.frames.length; fi2++) {
                 var frm2 = lyr2.frames[fi2];
                 if (frm2.startFrame !== fi2) continue;
-                var toDelete = [];
-                for (var ei2 = 1; ei2 < frm2.elements.length; ei2++) {
-                    var el2 = frm2.elements[ei2];
-                    if (el2.elementType === "instance" && el2.libraryItem) {
-                        toDelete.push(el2);
-                    }
+                // Mirror Phase 1: find the first instance at any index.
+                var p2fi = -1;
+                for (var p2i = 0; p2i < frm2.elements.length; p2i++) {
+                    if (frm2.elements[p2i].elementType === "instance" &&
+                        frm2.elements[p2i].libraryItem) { p2fi = p2i; break; }
                 }
-                if (toDelete.length === 0) continue;
-                stl.currentLayer = li2;
-                stl.currentFrame = fi2;
-                doc.selection = toDelete;
-                doc.deleteSelection();
+                if (p2fi < 0) continue; // no instances — nothing to clean up
+                // Pass A: delete all instance extras (JSFL rejects mixed-type
+                // selections so instances and shapes must be deleted separately).
+                var instDel = [];
+                for (var ei2 = 0; ei2 < frm2.elements.length; ei2++) {
+                    if (ei2 === p2fi) continue;
+                    var el2 = frm2.elements[ei2];
+                    if (el2.elementType === "instance" && el2.libraryItem) instDel.push(el2);
+                }
+                if (instDel.length > 0) {
+                    stl.currentLayer = li2; stl.currentFrame = fi2;
+                    doc.selection = instDel;
+                    doc.deleteSelection();
+                    stl = doc.getTimeline(); // re-fetch — element indices shifted
+                }
+                // Pass B: delete any shapes that remain on this frame.
+                var p2frm = stl.layers[li2].frames[fi2];
+                var shapeDel = [];
+                for (var si2 = 0; si2 < p2frm.elements.length; si2++) {
+                    if (p2frm.elements[si2].elementType === "shape") shapeDel.push(p2frm.elements[si2]);
+                }
+                if (shapeDel.length > 0) {
+                    stl.currentLayer = li2; stl.currentFrame = fi2;
+                    doc.selection = shapeDel;
+                    doc.deleteSelection();
+                    stl = doc.getTimeline();
+                }
             }
         }
 
         // Phase 3 — add each extra to its own new layer.
-        // addNewLayer shifts indices so re-look up the parent layer by name each time.
-        for (var xi = 0; xi < extras.length; xi++) {
+        // Iterate in REVERSE so that the first extra in the original stacking
+        // order (lowest z-index) ends up lowest after insertion.  Each new layer
+        // is inserted directly above the original layer; processing last-to-first
+        // means the highest-z extras are added first and get pushed down as
+        // subsequent (lower-z) extras are inserted above the original.
+        for (var xi = extras.length - 1; xi >= 0; xi--) {
             var ex = extras[xi];
             var libItem = findLibItem(lib, ex.libItemName);
             if (!libItem) {
@@ -275,9 +387,55 @@
             stl.currentLayer = li3;
             stl.currentFrame = ex.frameIdx;
             if (ex.frameIdx > 0) stl.insertBlankKeyframe(ex.frameIdx);
-            doc.addItem({ x: ex.x, y: ex.y }, libItem);
+            // Place at origin — the full matrix (including tx/ty) is applied below.
+            doc.addItem({ x: 0, y: 0 }, libItem);
+
+            // Restore the original matrix so scale/rotation/skew are preserved.
+            stl = doc.getTimeline();
+            var p3lyr = stl.layers[li3];
+            var p3frm = p3lyr ? p3lyr.frames[ex.frameIdx] : null;
+            var p3el  = p3frm && p3frm.elements.length > 0 ? p3frm.elements[0] : null;
+            if (p3el) {
+                var pm = p3el.matrix;
+                pm.a = ex.ma; pm.b = ex.mb; pm.c = ex.mc; pm.d = ex.md;
+                pm.tx = ex.mtx; pm.ty = ex.mty;
+                p3el.matrix = pm;
+                // transformX/Y is a UI pivot only — setting it after the matrix
+                // causes a second position shift, so we leave it at default.
+            }
             fl.trace("  [PRE-SEP] '" + ex.layerName + "' frame " + ex.frameIdx +
-                     ": '" + ex.libItemName + "' → new layer");
+                     ": '" + ex.libItemName + "' → new layer (a=" + ex.ma + " d=" + ex.md + ")");
+        }
+
+        // Phase 4 — remove residual shapes from instance-first layers.
+        // After Phase 2 extracted instance extras, some keyframes may still
+        // have DOMShape elements mixed in (e.g. a torso outline that sat between
+        // body-part instances on a single layer).  JSFL can't delete shapes and
+        // instances in one selection, so this is a dedicated shape-only pass.
+        stl = doc.getTimeline();
+        for (var p4li = 0; p4li < stl.layers.length; p4li++) {
+            var p4lyr = stl.layers[p4li];
+            p4lyr.locked = false; p4lyr.visible = true;
+            for (var p4fi = 0; p4fi < p4lyr.frames.length; p4fi++) {
+                var p4frm = p4lyr.frames[p4fi];
+                if (p4frm.startFrame !== p4fi) continue;
+                if (p4frm.elements.length === 0 ||
+                    p4frm.elements[0].elementType !== "instance") continue;
+                var p4del = [];
+                for (var p4ei = 0; p4ei < p4frm.elements.length; p4ei++) {
+                    if (p4frm.elements[p4ei].elementType === "shape") {
+                        p4del.push(p4frm.elements[p4ei]);
+                    }
+                }
+                if (p4del.length === 0) continue;
+                stl.currentLayer = p4li;
+                stl.currentFrame = p4fi;
+                doc.selection = p4del;
+                doc.deleteSelection();
+                fl.trace("  [PRE-SEP] removed " + p4del.length +
+                         " residual shape(s) from '" + p4lyr.name + "' frame " + p4fi);
+                stl = doc.getTimeline(); // re-fetch after deletion
+            }
         }
 
         // Unlock all layers (addNewLayer may leave new layers locked).

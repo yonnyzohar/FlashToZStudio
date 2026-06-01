@@ -32,23 +32,40 @@
         return null;
     }
 
-    // A "leaf" MC has exactly 1 layer with exactly 1 keyframe holding exactly
-    // 1 bitmap instance and no further animation.  No need to recurse into it.
+    // A "leaf" MC has no MC/Graphic instances anywhere in its timeline —
+    // either a single bitmap instance or purely vector shapes.
+    // No need to recurse into leaves; doing so can corrupt shape content.
     function isLeaf(item) {
         if (!item || !item.timeline) return true;
         var tl = item.timeline;
-        if (tl.layers.length !== 1) return false;
-        var layer = tl.layers[0];
-        var keyframeCount = 0;
-        for (var i = 0; i < layer.frames.length; i++) {
-            if (layer.frames[i].startFrame === i) keyframeCount++;
+        // Classic leaf: single layer, single keyframe, single bitmap instance.
+        if (tl.layers.length === 1) {
+            var layer = tl.layers[0];
+            var kfCount = 0;
+            for (var i = 0; i < layer.frames.length; i++) {
+                if (layer.frames[i].startFrame === i) kfCount++;
+            }
+            if (kfCount === 1) {
+                var elems = layer.frames[0].elements;
+                if (elems.length === 1 &&
+                    elems[0].elementType === "instance" &&
+                    elems[0].libraryItem  &&
+                    elems[0].libraryItem.itemType === "bitmap") return true;
+            }
         }
-        if (keyframeCount !== 1) return false;
-        var elems = layer.frames[0].elements;
-        if (elems.length !== 1) return false;
-        return elems[0].elementType === "instance" &&
-               elems[0].libraryItem  &&
-               elems[0].libraryItem.itemType === "bitmap";
+        // Shape-only leaf: no MC/Graphic instances in any layer or frame.
+        // These symbols are pure vector artwork; unifying them is a no-op and
+        // calling lib.editItem on them can corrupt their content.
+        for (var li = 0; li < tl.layers.length; li++) {
+            var frames = tl.layers[li].frames;
+            for (var fi = 0; fi < frames.length; fi++) {
+                if (frames[fi].startFrame !== fi) continue;
+                for (var ei = 0; ei < frames[fi].elements.length; ei++) {
+                    if (frames[fi].elements[ei].elementType === "instance") return false;
+                }
+            }
+        }
+        return true;
     }
 
     // Select every layer in the timeline so the unify script processes them all.
@@ -99,11 +116,18 @@
                  " — " + tl.layers.length + " layer(s)");
 
         // ── Step A: unify all layers in this timeline ─────────────────────
-        selectAllLayers(tl);
-        fl.runScript(unifyScript);
+        // Skip the root scene (depth 0).  The root scene uses a 3D layer-
+        // parenting rig with motion tweens; running unifyKeyframesToFirstSymbol
+        // on it would delete static shape layers (e.g. the Bicycle drawing)
+        // and corrupt motion-tween keyframes, causing frame 0 to go missing.
+        // Nested library MC timelines are processed normally (depth > 0).
+        if (depth > 0) {
+            selectAllLayers(tl);
+            fl.runScript(unifyScript);
 
-        // Re-fetch timeline; runScript may have altered element state.
-        tl = doc.getTimeline();
+            // Re-fetch timeline; runScript may have altered element state.
+            tl = doc.getTimeline();
+        }
 
         // ── Step B: recurse into every MC now referenced on stage ─────────
         var mcNames = referencedMCNames(tl);
@@ -149,12 +173,26 @@
     doc.exitEditMode();
 
     fl.trace("════════════════════════════════════════");
-    fl.trace("Full Pipeline — pass 2: unify all timelines");
+    fl.trace("Full Pipeline — pass 2: unify all timelines (nested symbols)");
     fl.trace("════════════════════════════════════════");
 
     // Always start from the root scene.
     doc.exitEditMode();
     processTimeline(0, "Scene (root)");
+
+    doc.exitEditMode();
+
+    // Pass 3: second unused-item sweep.
+    // The unify pass (pass 2) may have deleted puppet/shape layers that were
+    // referencing library symbols.  Those symbols are now unreferenced but
+    // were not caught by the unused-removal inside pass 1 (which ran before
+    // the deletions).  Running convertLibraryToMovieClips again is safe —
+    // it is idempotent for already-converted items — and its Step 5 will
+    // clean up any newly orphaned symbols (PuppetShape, WarpedAsset, etc.).
+    fl.trace("════════════════════════════════════════");
+    fl.trace("Full Pipeline — pass 3: second unused-item sweep");
+    fl.trace("════════════════════════════════════════");
+    fl.runScript(convertScript);
 
     doc.exitEditMode();
     fl.trace("════════════════════════════════════════");
